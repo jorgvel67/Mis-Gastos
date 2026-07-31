@@ -241,7 +241,20 @@
           <input type="number" id="newCurrRate" placeholder="Tasa a moneda principal" step="0.0001">
           <button class="iconx" style="color:var(--green);" onclick="addCurrency()">＋</button>
         </div>
-        <p style="color:var(--muted); font-size:12px; margin-top:6px;">Tasa = cuántas unidades de tu moneda principal equivalen a 1 unidad de esa moneda. Ajusta cuando cambie el tipo de cambio.</p>
+        <p style="color:var(--muted); font-size:12px; margin-top:6px;">Tasa = cuántas unidades de tu moneda principal equivalen a 1 unidad de esa moneda.</p>
+
+        <div class="settings-item">
+          <div>
+            <div style="font-size:13.5px; font-weight:600;">Actualizar tasas automáticamente</div>
+            <div style="font-size:11.5px; color:var(--muted); margin-top:2px;" id="ratesUpdatedLabel">Nunca actualizado</div>
+          </div>
+          <label style="display:inline-flex; align-items:center;">
+            <input type="checkbox" id="autoRatesToggle" onchange="toggleAutoRates(this.checked)" style="width:20px; height:20px;">
+          </label>
+        </div>
+        <button class="btn secondary small" style="margin-top:10px;" onclick="updateRatesNow()" id="updateRatesBtn">Actualizar tasas ahora</button>
+        <p style="color:var(--muted); font-size:12px; margin-top:6px;">Al actualizar, se consultan tasas actuales de internet (necesitas conexión) solo para las monedas que ya agregaste arriba. Si prefieres, puedes seguir editándolas a mano.</p>
+        <p style="color:var(--muted); font-size:10.5px; margin-top:8px;">Tasas de cambio por <a href="https://www.exchangerate-api.com" target="_blank" style="color:var(--muted);">exchangerate-api.com</a></p>
       </div>
 
       <div class="card">
@@ -326,7 +339,9 @@ function defaultState(){
     currencies: {USD: 1},
     categories: JSON.parse(JSON.stringify(DEFAULT_CATEGORIES)),
     budgets: {},
-    expenses: []
+    expenses: [],
+    autoRates: true,
+    lastRatesUpdate: null
   };
 }
 
@@ -646,12 +661,65 @@ function renderSettings(){
   catMgmt.innerHTML = state.categories.map(c=>
     `<div class="chip">${c.emoji} ${c.name} <span style="cursor:pointer; color:var(--red); margin-left:4px;" onclick="removeCategory('${c.id}')">✕</span></div>`
   ).join('');
+
+  const toggle = document.getElementById('autoRatesToggle');
+  if(toggle) toggle.checked = !!state.autoRates;
+  const label = document.getElementById('ratesUpdatedLabel');
+  if(label){
+    label.textContent = state.lastRatesUpdate
+      ? 'Última actualización: ' + new Date(state.lastRatesUpdate).toLocaleString('es', {day:'2-digit', month:'short', hour:'2-digit', minute:'2-digit'})
+      : 'Nunca actualizado';
+  }
 }
 function setHomeCurrency(code){
   state.homeCurrency = code;
   state.currencies[code] = 1;
   save();
   renderAll();
+  updateRatesNow(true);
+}
+function toggleAutoRates(checked){
+  state.autoRates = checked;
+  save();
+  if(checked) updateRatesNow(true);
+}
+
+/* ===================== TASAS DE CAMBIO AUTOMÁTICAS ===================== */
+async function updateRatesNow(silent){
+  const btn = document.getElementById('updateRatesBtn');
+  if(btn){ btn.disabled = true; btn.textContent = 'Actualizando…'; }
+  try{
+    const res = await fetch('https://open.er-api.com/v6/latest/' + encodeURIComponent(state.homeCurrency));
+    if(!res.ok) throw new Error('respuesta no válida');
+    const data = await res.json();
+    if(!data || !data.rates) throw new Error('sin datos de tasas');
+    let updated = 0;
+    Object.keys(state.currencies).forEach(code=>{
+      if(code === state.homeCurrency) return;
+      const apiRate = data.rates[code]; // unidades de CODE por 1 de homeCurrency
+      if(apiRate && apiRate > 0){
+        state.currencies[code] = 1 / apiRate; // homeCurrency por 1 de CODE
+        updated++;
+      }
+    });
+    state.lastRatesUpdate = Date.now();
+    save();
+    if(!silent) showToast(updated > 0 ? 'Tasas actualizadas (' + updated + ')' : 'Sin monedas para actualizar');
+  }catch(e){
+    if(!silent) showToast('No se pudo actualizar (revisa tu conexión)');
+    console.warn('No se pudieron actualizar las tasas', e);
+  }finally{
+    if(btn){ btn.disabled = false; btn.textContent = 'Actualizar tasas ahora'; }
+    if(currentTab === 'ajustes') renderSettings();
+  }
+}
+function maybeAutoUpdateRates(){
+  if(!state.autoRates) return;
+  const last = state.lastRatesUpdate;
+  const dayMs = 24 * 60 * 60 * 1000;
+  if(!last || (Date.now() - last) > dayMs){
+    updateRatesNow(true);
+  }
 }
 function addCurrency(){
   const codeEl = document.getElementById('newCurrCode');
@@ -764,6 +832,7 @@ function renderAll(){
 /* ===================== INIT ===================== */
 switchTab('gastos');
 renderAll();
+maybeAutoUpdateRates();
 </script>
 </body>
 </html>
