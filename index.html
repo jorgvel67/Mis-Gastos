@@ -268,6 +268,42 @@
       </div>
 
       <div class="card">
+        <strong style="font-size:14px;">Sincronización entre dispositivos</strong>
+        <p style="color:var(--muted); font-size:12px; margin:8px 0 12px;">Usa un Gist privado y gratuito de tu cuenta de GitHub como "nube" personal para que tus gastos se vean iguales en el iPhone y en el computador.</p>
+
+        <div class="field">
+          <label>Token de acceso de GitHub (permiso "gist")</label>
+          <input type="password" id="syncToken" placeholder="ghp_xxxxxxxxxxxx" autocapitalize="off" autocorrect="off">
+        </div>
+        <div class="field">
+          <label>ID del Gist</label>
+          <input type="text" id="syncGistId" placeholder="Se llena solo al crear uno nuevo" autocapitalize="off" autocorrect="off">
+        </div>
+        <div style="display:flex; flex-direction:column; gap:10px;">
+          <button class="btn secondary small" onclick="saveSyncConfigFromUI()">Guardar datos de sincronización</button>
+          <button class="btn secondary small" onclick="createSyncGist()">Crear Gist nuevo (solo la 1ª vez, en 1 dispositivo)</button>
+        </div>
+
+        <div class="settings-item">
+          <div>
+            <div style="font-size:13.5px; font-weight:600;">Sincronizar automáticamente</div>
+            <div style="font-size:11.5px; color:var(--muted); margin-top:2px;" id="syncStatusLabel">No configurado</div>
+          </div>
+          <label style="display:inline-flex; align-items:center;">
+            <input type="checkbox" id="autoSyncToggle" onchange="toggleAutoSync(this.checked)" style="width:20px; height:20px;">
+          </label>
+        </div>
+        <div style="display:flex; gap:10px; margin-top:10px;">
+          <button class="btn secondary small" style="flex:1;" onclick="pullFromGist(false)">Descargar de la nube</button>
+          <button class="btn secondary small" style="flex:1;" onclick="pushToGist(false)">Subir a la nube</button>
+        </div>
+        <p style="color:var(--muted); font-size:11.5px; margin-top:10px;">1) En un dispositivo, pega tu token y toca "Crear Gist nuevo" — copia el ID que aparece. 2) En el otro dispositivo, pega el mismo token y ese mismo ID, y toca "Guardar datos de sincronización". Con "Sincronizar automáticamente" activado, cada cambio se sube solo y al abrir la app se descarga la versión más reciente entre ambos dispositivos.</p>
+        <p style="color:var(--muted); font-size:11px; margin-top:8px;">
+          ¿No tienes token? <a href="https://github.com/settings/tokens/new?scopes=gist&description=Mis%20Gastos%20Sync" target="_blank" style="color:var(--accent);">Créalo aquí</a> (elige expiración larga, deja marcado solo "gist", genera y copia el código que empieza con "ghp_"). El token se guarda solo en este dispositivo, nunca se sube a ningún lado.
+        </p>
+      </div>
+
+      <div class="card">
         <strong style="font-size:14px;">Datos</strong>
         <div style="display:flex; flex-direction:column; gap:10px; margin-top:12px;">
           <button class="btn secondary small" onclick="exportCSV()">Exportar CSV de gastos</button>
@@ -341,7 +377,8 @@ function defaultState(){
     budgets: {},
     expenses: [],
     autoRates: true,
-    lastRatesUpdate: null
+    lastRatesUpdate: null,
+    updatedAt: null
   };
 }
 
@@ -354,13 +391,15 @@ function load(){
     return Object.assign(defaultState(), parsed);
   }catch(e){ return defaultState(); }
 }
-function save(){
+function save(skipSyncPush){
+  state.updatedAt = Date.now();
   try{
     localStorage.setItem(STORAGE_KEY, JSON.stringify(state));
   }catch(e){
     console.warn('No se pudo guardar en almacenamiento local', e);
     if(typeof showToast === 'function') showToast('⚠️ No se pudo guardar el cambio en este dispositivo');
   }
+  if(!skipSyncPush && typeof scheduleSyncPush === 'function') scheduleSyncPush();
 }
 function uid(){ return Date.now().toString(36) + Math.random().toString(36).slice(2,8); }
 
@@ -670,6 +709,24 @@ function renderSettings(){
       ? 'Última actualización: ' + new Date(state.lastRatesUpdate).toLocaleString('es', {day:'2-digit', month:'short', hour:'2-digit', minute:'2-digit'})
       : 'Nunca actualizado';
   }
+
+  const syncCfg = loadSyncConfig();
+  const tokenEl = document.getElementById('syncToken');
+  const gistEl = document.getElementById('syncGistId');
+  if(tokenEl && document.activeElement !== tokenEl) tokenEl.value = syncCfg.token || '';
+  if(gistEl && document.activeElement !== gistEl) gistEl.value = syncCfg.gistId || '';
+  const autoSyncEl = document.getElementById('autoSyncToggle');
+  if(autoSyncEl) autoSyncEl.checked = !!syncCfg.autoSync;
+  const syncLabel = document.getElementById('syncStatusLabel');
+  if(syncLabel){
+    if(!syncCfg.token || !syncCfg.gistId){
+      syncLabel.textContent = 'No configurado';
+    }else{
+      syncLabel.textContent = syncCfg.lastSyncedAt
+        ? 'Última sincronización: ' + new Date(syncCfg.lastSyncedAt).toLocaleString('es', {day:'2-digit', month:'short', hour:'2-digit', minute:'2-digit'})
+        : 'Configurado, aún sin sincronizar';
+    }
+  }
 }
 function setHomeCurrency(code){
   state.homeCurrency = code;
@@ -721,6 +778,143 @@ function maybeAutoUpdateRates(){
     updateRatesNow(true);
   }
 }
+
+/* ===================== SINCRONIZACIÓN (GITHUB GIST) ===================== */
+const SYNC_CONFIG_KEY = 'misGastos_sync_v1';
+const GIST_FILENAME = 'mis-gastos-data.json';
+
+function loadSyncConfig(){
+  try{
+    const raw = localStorage.getItem(SYNC_CONFIG_KEY);
+    if(!raw) return {token:'', gistId:'', autoSync:false, lastSyncedAt:null};
+    return Object.assign({token:'', gistId:'', autoSync:false, lastSyncedAt:null}, JSON.parse(raw));
+  }catch(e){ return {token:'', gistId:'', autoSync:false, lastSyncedAt:null}; }
+}
+function saveSyncConfig(cfg){
+  try{ localStorage.setItem(SYNC_CONFIG_KEY, JSON.stringify(cfg)); }
+  catch(e){ console.warn('No se pudo guardar la configuración de sincronización', e); }
+}
+function saveSyncConfigFromUI(){
+  const cfg = loadSyncConfig();
+  cfg.token = document.getElementById('syncToken').value.trim();
+  cfg.gistId = document.getElementById('syncGistId').value.trim();
+  saveSyncConfig(cfg);
+  showToast('Datos de sincronización guardados');
+  renderSettings();
+}
+function toggleAutoSync(checked){
+  const cfg = loadSyncConfig();
+  cfg.autoSync = checked;
+  saveSyncConfig(cfg);
+  if(checked) pullFromGist(true);
+}
+function gistHeaders(token){
+  return {
+    'Authorization': 'token ' + token,
+    'Accept': 'application/vnd.github+json',
+    'Content-Type': 'application/json'
+  };
+}
+async function createSyncGist(){
+  const token = document.getElementById('syncToken').value.trim();
+  if(!token){ showToast('Primero pega tu token de GitHub'); return; }
+  try{
+    const res = await fetch('https://api.github.com/gists', {
+      method: 'POST',
+      headers: gistHeaders(token),
+      body: JSON.stringify({
+        description: 'Mis Gastos - datos sincronizados (no compartir)',
+        public: false,
+        files: { [GIST_FILENAME]: { content: JSON.stringify(state) } }
+      })
+    });
+    if(!res.ok) throw new Error('GitHub respondió ' + res.status);
+    const data = await res.json();
+    const cfg = loadSyncConfig();
+    cfg.token = token;
+    cfg.gistId = data.id;
+    cfg.autoSync = true;
+    cfg.lastSyncedAt = Date.now();
+    saveSyncConfig(cfg);
+    renderSettings();
+    showToast('Gist creado. Copia el ID y pégalo en tu otro dispositivo.');
+  }catch(e){
+    console.warn('No se pudo crear el Gist', e);
+    showToast('No se pudo crear el Gist (revisa el token y tu conexión)');
+  }
+}
+async function pushToGist(silent){
+  const cfg = loadSyncConfig();
+  if(!cfg.token || !cfg.gistId){
+    if(!silent) showToast('Configura primero el token y el ID del Gist');
+    return;
+  }
+  try{
+    const res = await fetch('https://api.github.com/gists/' + encodeURIComponent(cfg.gistId), {
+      method: 'PATCH',
+      headers: gistHeaders(cfg.token),
+      body: JSON.stringify({ files: { [GIST_FILENAME]: { content: JSON.stringify(state) } } })
+    });
+    if(!res.ok) throw new Error('GitHub respondió ' + res.status);
+    cfg.lastSyncedAt = Date.now();
+    saveSyncConfig(cfg);
+    if(!silent) showToast('Subido a la nube');
+    if(currentTab === 'ajustes') renderSettings();
+  }catch(e){
+    console.warn('No se pudo subir a la nube', e);
+    if(!silent) showToast('No se pudo subir (revisa tu conexión)');
+  }
+}
+async function pullFromGist(silent){
+  const cfg = loadSyncConfig();
+  if(!cfg.token || !cfg.gistId){
+    if(!silent) showToast('Configura primero el token y el ID del Gist');
+    return;
+  }
+  if(!silent){
+    const ok = confirm('Esto reemplazará los datos de este dispositivo con los que están guardados en la nube. ¿Continuar?');
+    if(!ok) return;
+  }
+  try{
+    const res = await fetch('https://api.github.com/gists/' + encodeURIComponent(cfg.gistId), {
+      headers: gistHeaders(cfg.token)
+    });
+    if(!res.ok) throw new Error('GitHub respondió ' + res.status);
+    const data = await res.json();
+    const file = data.files && data.files[GIST_FILENAME];
+    if(!file || !file.content) throw new Error('el Gist no tiene datos todavía');
+    const remote = JSON.parse(file.content);
+    const remoteTime = remote.updatedAt || 0;
+    const localTime = state.updatedAt || 0;
+    if(silent && remoteTime <= localTime){
+      // la versión local ya es igual o más nueva, no hacemos nada
+      cfg.lastSyncedAt = Date.now();
+      saveSyncConfig(cfg);
+      return;
+    }
+    state = Object.assign(defaultState(), remote);
+    save(true);
+    cfg.lastSyncedAt = Date.now();
+    saveSyncConfig(cfg);
+    renderAll();
+    if(!silent) showToast('Datos descargados de la nube');
+  }catch(e){
+    console.warn('No se pudo descargar de la nube', e);
+    if(!silent) showToast('No se pudo descargar (revisa el token, el ID o tu conexión)');
+  }
+}
+let syncPushTimer = null;
+function scheduleSyncPush(){
+  const cfg = loadSyncConfig();
+  if(!cfg.autoSync || !cfg.token || !cfg.gistId) return;
+  clearTimeout(syncPushTimer);
+  syncPushTimer = setTimeout(()=> pushToGist(true), 1500);
+}
+function trySyncOnLoad(){
+  const cfg = loadSyncConfig();
+  if(cfg.autoSync && cfg.token && cfg.gistId) pullFromGist(true);
+}
+
 function addCurrency(){
   const codeEl = document.getElementById('newCurrCode');
   const rateEl = document.getElementById('newCurrRate');
@@ -833,6 +1027,7 @@ function renderAll(){
 switchTab('gastos');
 renderAll();
 maybeAutoUpdateRates();
+trySyncOnLoad();
 </script>
 </body>
 </html>
