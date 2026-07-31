@@ -268,6 +268,17 @@
       </div>
 
       <div class="card">
+        <strong style="font-size:14px;">Métodos de pago</strong>
+        <div class="chip-row" id="paymentMgmt"></div>
+        <div class="curr-row" style="margin-top:10px;">
+          <input type="text" id="newPmEmoji" placeholder="💳" style="width:50px !important; flex:none; text-align:center;" maxlength="2">
+          <input type="text" id="newPmName" placeholder="Ej. Crédito BBVA">
+          <button class="iconx" style="color:var(--green);" onclick="addPaymentMethod()">＋</button>
+        </div>
+        <p style="color:var(--muted); font-size:12px; margin-top:6px;">Agrega tantas tarjetas como uses (una por cada tarjeta de crédito, por ejemplo) para saber con qué pagaste cada gasto.</p>
+      </div>
+
+      <div class="card">
         <strong style="font-size:14px;">Sincronización entre dispositivos</strong>
         <p style="color:var(--muted); font-size:12px; margin:8px 0 12px;">Usa un Gist privado y gratuito de tu cuenta de GitHub como "nube" personal para que tus gastos se vean iguales en el iPhone y en el computador.</p>
 
@@ -340,6 +351,10 @@
     <div class="chip-row" id="catChips"></div>
   </div>
   <div class="field">
+    <label>Método de pago</label>
+    <div class="chip-row" id="paymentChips"></div>
+  </div>
+  <div class="field">
     <label>Fecha</label>
     <input type="date" id="expDate">
   </div>
@@ -368,12 +383,18 @@ const DEFAULT_CATEGORIES = [
   {id:'otros', name:'Otros', emoji:'📦'}
 ];
 const COLORS = ['#5b8cff','#3ecf8e','#f5c04a','#f2596b','#a67bff','#4fd1e8','#ff9f5b','#8ab4f8','#e57bd4','#7cd992'];
+const DEFAULT_PAYMENT_METHODS = [
+  {id:'efectivo', name:'Efectivo', emoji:'💵'},
+  {id:'debito', name:'Débito', emoji:'💳'},
+  {id:'credito', name:'Crédito', emoji:'💳'}
+];
 
 function defaultState(){
   return {
     homeCurrency: 'USD',
     currencies: {USD: 1},
     categories: JSON.parse(JSON.stringify(DEFAULT_CATEGORIES)),
+    paymentMethods: JSON.parse(JSON.stringify(DEFAULT_PAYMENT_METHODS)),
     budgets: {},
     expenses: [],
     autoRates: true,
@@ -408,6 +429,7 @@ let currentTab = 'gastos';
 let viewDate = new Date();
 let editingId = null;
 let selectedCategoryId = null;
+let selectedPaymentId = null;
 
 const MONTHS = ['Enero','Febrero','Marzo','Abril','Mayo','Junio','Julio','Agosto','Septiembre','Octubre','Noviembre','Diciembre'];
 
@@ -425,6 +447,7 @@ function expensesForMonth(d){
   return state.expenses.filter(e => e.date.slice(0,7) === key);
 }
 function catById(id){ return state.categories.find(c=>c.id===id) || {name:'Otros', emoji:'📦', id:'otros'}; }
+function pmById(id){ return state.paymentMethods.find(p=>p.id===id) || null; }
 
 /* ===================== TAB NAV ===================== */
 function switchTab(tab){
@@ -466,12 +489,16 @@ function renderExpenseList(){
     html += '<div class="day-group"><div class="day-title">'+label+'</div>';
     groups[date].forEach(e=>{
       const cat = catById(e.category);
+      const pm = e.paymentMethod ? pmById(e.paymentMethod) : null;
       const converted = e.currency !== state.homeCurrency ? toHome(e.amount, e.currency) : null;
+      const subParts = [];
+      if(e.note) subParts.push(escapeHtml(e.note));
+      if(pm) subParts.push(pm.emoji + ' ' + escapeHtml(pm.name));
       html += `<div class="expense-row" onclick="openExpenseSheet('${e.id}')">
         <div class="icon">${cat.emoji}</div>
         <div class="info">
           <div class="cat">${cat.name}</div>
-          ${e.note ? `<div class="note">${escapeHtml(e.note)}</div>` : ''}
+          ${subParts.length ? `<div class="note">${subParts.join(' · ')}</div>` : ''}
         </div>
         <div class="amt">
           <div class="main">${fmtMoney(e.amount)} ${e.currency}</div>
@@ -503,6 +530,14 @@ function renderCatChips(){
 }
 function selectCategory(id){ selectedCategoryId = id; renderCatChips(); }
 
+function renderPaymentChips(){
+  const wrap = document.getElementById('paymentChips');
+  wrap.innerHTML = state.paymentMethods.map(p=>
+    `<div class="chip ${selectedPaymentId===p.id ? 'selected':''}" onclick="selectPayment('${p.id}')">${p.emoji} ${p.name}</div>`
+  ).join('');
+}
+function selectPayment(id){ selectedPaymentId = id; renderPaymentChips(); }
+
 function openExpenseSheet(id){
   editingId = id || null;
   document.getElementById('sheetTitle').textContent = id ? 'Editar gasto' : 'Nuevo gasto';
@@ -517,13 +552,16 @@ function openExpenseSheet(id){
     document.getElementById('expDate').value = e.date;
     document.getElementById('expNote').value = e.note || '';
     selectedCategoryId = e.category;
+    selectedPaymentId = e.paymentMethod && pmById(e.paymentMethod) ? e.paymentMethod : (state.paymentMethods[0] ? state.paymentMethods[0].id : null);
   }else{
     document.getElementById('expAmount').value = '';
     document.getElementById('expDate').value = new Date().toISOString().slice(0,10);
     document.getElementById('expNote').value = '';
     selectedCategoryId = state.categories[0].id;
+    selectedPaymentId = state.paymentMethods[0] ? state.paymentMethods[0].id : null;
   }
   renderCatChips();
+  renderPaymentChips();
   document.getElementById('sheetOverlay').classList.add('active');
   document.getElementById('expenseSheet').classList.add('active');
 }
@@ -538,12 +576,13 @@ function saveExpense(){
   const currency = document.getElementById('expCurrency').value;
   const date = document.getElementById('expDate').value || new Date().toISOString().slice(0,10);
   const note = document.getElementById('expNote').value.trim();
+  const paymentMethod = selectedPaymentId || null;
 
   if(editingId){
     const e = state.expenses.find(x=>x.id===editingId);
-    Object.assign(e, {amount, currency, date, note, category:selectedCategoryId});
+    Object.assign(e, {amount, currency, date, note, category:selectedCategoryId, paymentMethod});
   }else{
-    state.expenses.push({id:uid(), amount, currency, date, note, category:selectedCategoryId});
+    state.expenses.push({id:uid(), amount, currency, date, note, category:selectedCategoryId, paymentMethod});
   }
   save();
   closeExpenseSheet();
@@ -699,6 +738,11 @@ function renderSettings(){
   const catMgmt = document.getElementById('categoryMgmt');
   catMgmt.innerHTML = state.categories.map(c=>
     `<div class="chip">${c.emoji} ${c.name} <span style="cursor:pointer; color:var(--red); margin-left:4px;" onclick="removeCategory('${c.id}')">✕</span></div>`
+  ).join('');
+
+  const pmMgmt = document.getElementById('paymentMgmt');
+  pmMgmt.innerHTML = state.paymentMethods.map(p=>
+    `<div class="chip">${p.emoji} ${p.name} <span style="cursor:pointer; color:var(--red); margin-left:4px;" onclick="removePaymentMethod('${p.id}')">✕</span></div>`
   ).join('');
 
   const toggle = document.getElementById('autoRatesToggle');
@@ -955,6 +999,23 @@ function removeCategory(id){
   delete state.budgets[id];
   save(); renderAll();
 }
+function addPaymentMethod(){
+  const emojiEl = document.getElementById('newPmEmoji');
+  const nameEl = document.getElementById('newPmName');
+  const name = nameEl.value.trim();
+  if(!name){ showToast('Escribe un nombre'); return; }
+  const emoji = emojiEl.value.trim() || '💳';
+  state.paymentMethods.push({id: uid(), name, emoji});
+  emojiEl.value=''; nameEl.value='';
+  save(); renderAll();
+  showToast('Método de pago agregado');
+}
+function removePaymentMethod(id){
+  const inUse = state.expenses.some(e=>e.paymentMethod===id);
+  if(inUse){ showToast('No se puede borrar: hay gastos con este método de pago'); return; }
+  state.paymentMethods = state.paymentMethods.filter(p=>p.id!==id);
+  save(); renderAll();
+}
 
 /* ===================== EXPORT ===================== */
 function download(filename, content, type){
@@ -966,12 +1027,13 @@ function download(filename, content, type){
   setTimeout(()=>{ document.body.removeChild(a); URL.revokeObjectURL(url); }, 500);
 }
 function exportCSV(){
-  let csv = 'Fecha,Categoria,Monto,Moneda,Monto en '+state.homeCurrency+',Nota\n';
+  let csv = 'Fecha,Categoria,Metodo de pago,Monto,Moneda,Monto en '+state.homeCurrency+',Nota\n';
   state.expenses.slice().sort((a,b)=>a.date.localeCompare(b.date)).forEach(e=>{
     const cat = catById(e.category).name;
+    const pm = e.paymentMethod && pmById(e.paymentMethod) ? pmById(e.paymentMethod).name : '';
     const conv = toHome(e.amount, e.currency).toFixed(2);
     const note = (e.note||'').replace(/"/g,'""');
-    csv += `${e.date},"${cat}",${e.amount},${e.currency},${conv},"${note}"\n`;
+    csv += `${e.date},"${cat}","${pm}",${e.amount},${e.currency},${conv},"${note}"\n`;
   });
   download('gastos.csv', csv, 'text/csv');
   showToast('CSV exportado');
